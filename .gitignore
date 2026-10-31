@@ -1,0 +1,7 @@
+.build/
+data/
+artifacts/*
+!artifacts/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store
