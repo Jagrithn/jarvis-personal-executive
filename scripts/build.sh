@@ -6,7 +6,7 @@ BUILD="$ROOT/.build"
 APP="$BUILD/JARVIS.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$BUILD/module-cache"
 export CLANG_MODULE_CACHE_PATH="$BUILD/module-cache"
-xcrun swiftc -module-cache-path "$BUILD/module-cache" -parse-as-library apps/mac/Jarvis.swift -o "$APP/Contents/MacOS/JARVIS" -framework SwiftUI -framework AppKit
+xcrun swiftc -module-cache-path "$BUILD/module-cache" -parse-as-library apps/mac/Jarvis.swift apps/mac/CommandCenter.swift -o "$APP/Contents/MacOS/JARVIS" -framework SwiftUI -framework AppKit
 xcrun swiftc -module-cache-path "$BUILD/module-cache" apps/mac/Verifier.swift -o "$APP/Contents/Resources/verify-app" -framework AppKit
 cp -R services/executive "$APP/Contents/Resources/"
 python3 - "$APP" "$ROOT" "$(command -v python3)" <<'PY'

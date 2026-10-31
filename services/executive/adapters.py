@@ -7,16 +7,17 @@ from policy import CAPABILITIES
 class Cancelled(Exception):
     pass
 
-def run_process(args, cancel, timeout=10):
-    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def run_process(args, cancel, timeout=10, input_text=None):
+    process = subprocess.Popen(args, stdin=subprocess.PIPE if input_text is not None else None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + timeout
     while True:
         try:
-            out, err = process.communicate(timeout=.05)
+            out, err = process.communicate(input=input_text, timeout=.05)
             if process.returncode:
                 raise RuntimeError(err.strip() or 'Adapter process failed')
             return out.strip()
         except subprocess.TimeoutExpired:
+            input_text = None
             if cancel.is_set() or time.monotonic() > deadline:
                 process.terminate()
                 try:

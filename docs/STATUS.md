@@ -1,25 +1,28 @@
-# Phase 0–1 status — 31 October 2026
+# JARVIS status — 31 October 2026
 
-Implemented and locally demonstrated on the owner's Apple M5 MacBook Air (16 GB, macOS 27.0.1).
+## Current release: command-center UI + Phase 2 local reasoning
 
-## Delivered
+The native app is rebuilt and running. Dark navy/cyan styling, instrument-style executive core, grid background, mission archive, actual task counters, quick operations, console input, results/evidence and local-model status replace the original plain interface.
 
-Native SwiftUI window + menu bar; deterministic typed commands and suggestions; history/transcript, progress, authorization and evidence; authenticated private loopback service; supervised child startup and crash recovery; SQLite persistence; one queue; scoped policy; cancellation; Stop All/Resume; four real adapters with independent verification. Build/run/test scripts and a locally signed `.build/JARVIS.app` are available. Both original specification files are preserved unchanged.
+Ollama **0.40.13** and **Qwen3 4B Q4_K_M** are installed on this Apple M5 / 16 GB Mac. The model is enabled for local-only routing. Natural-language interpretations are proposals: the owner must confirm before a fixed allowlisted capability executes. Exact commands still bypass the model. Compound/negated instructions are refused conservatively. No new external-action capabilities were added.
 
-## Observed evidence
+## Verified results
 
-- Swift app and NSWorkspace verifier compiled successfully; local ad-hoc signing succeeded.
-- `./scripts/test.sh`: **12 tests passed**, final run 1.204 seconds. Detailed log: `artifacts/tests.log`.
-- `python3 scripts/smoke.py`: **passed** all four real commands, independent evidence, rejected external path, stop/resume, history after restart, and graceful shutdown via parent-pipe EOF. Machine-readable receipts: `artifacts/smoke-results.json`.
-- Native window inspected with computer-use accessibility and screenshot tools: live connected status, sample creation, result/read-back hash, scope and progress; Stop All disabled commands and Resume restored them.
-- Forced backend crash: UI displayed “Executive stopped” and disabled actions. Restart Executive reconnected and preserved history.
-- Quit/relaunch and final rebuild: history retained, local service reconnected. Typed `list demo folder` submitted successfully and displayed independent listing evidence.
-- Final app left running for the owner. Calculator and Finder were opened during smoke testing; no personal documents were edited.
+- Native app and verifier build successfully; ad-hoc signing succeeded.
+- **24 automated tests passed** (2.209 seconds in final run): `artifacts/tests-phase2.log`. Includes policy, persistence, API authentication, confirmation, duplicate approvals, refusal, real subprocess cancellation/private input, and existing Phase 1 behavior.
+- **20/20 routing checks passed** in the final guarded pipeline: `artifacts/model-benchmark.json`. Eighteen requests used the local model and two were refused by deterministic guards. The initial raw-model run scored 19/20; its multi-action error is retained in `artifacts/model-benchmark-initial.json` and motivated the guard.
+- Median complete routing latency: **1.06 s**; median model-only latency: **1.14 s**; median output generation: **46.7 tokens/s**. These are a small scripted benchmark, not a guarantee for arbitrary requests.
+- Ollama reported **2.68 GiB** loaded model allocation (Metal, context 2048); macOS memory-pressure query reported **30% free** before and after the final run. This is a snapshot, not measured peak process RAM.
+- Real model/executive smoke passed: proposal creates no file, confirmation creates and verifies one file, rejection executes nothing, unsupported email request is refused. Evidence: `artifacts/reasoning-smoke-results.json`.
+- All four real Mac command smoke tests passed again, including restart persistence: `artifacts/smoke-results.json`.
+- Native UI verified: redesigned layout, Stop All/Resume, model ready state, natural-language sample-file proposal, Confirm action, succeeded state and read-back hash. Quit stopped the owned Ollama service; relaunch reconnected and preserved history. Final app left open.
 
-## Dependencies and permissions
+## Installation and boundaries
 
-No third-party executable dependencies installed. Existing Swift/AppKit/SwiftUI, Python standard library and SQLite used. No microphone, Accessibility, Full Disk Access, screen-recording, account, or cloud permissions requested by JARVIS. Test execution required escaping Codex's loopback-bind restriction; local Git initialization required access to protected `.git` metadata. No unresolved approval blocks.
+Official Ollama app installed to `/Applications/Ollama.app`. Signature verified. Optional system-wide CLI shortcut could not be created without administrator authentication; JARVIS uses the bundled executable directly, so this is not a runtime blocker. No login item, Accessibility, microphone, Full Disk Access, or account integration was configured.
 
-## Known limits and next step
+Model inference uses only loopback port 11435 with cloud features disabled. The first model download required internet access. Exact run/setup instructions and reasoning behavior are documented in `PHASE2.md` and `README.md`. Both original specifications remain unchanged.
 
-See RISKS.md. This is a local development package, with build-time absolute paths and ad-hoc signing. It provides four deterministic commands, not general AI reasoning. Phase 2 local reasoning/model evaluation is the next milestone and has not begun. Voice, personal knowledge, OpenCode and Agent Factory remain deferred. No wrong-port UI injection test was performed; network/auth failures are covered at the API layer and an actual backend crash was checked in the native UI.
+## Remaining work
+
+This release understands variations of the four supported operations; it is not yet a general-purpose assistant. Voice and browser tooling (Phase 3), second-brain ingestion, OpenCode, communications, and Agent Factory remain future milestones. Messages cannot be sent by this build. See `RISKS.md` for local-development packaging and concurrency limitations.

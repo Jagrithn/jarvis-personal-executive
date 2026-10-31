@@ -19,3 +19,7 @@ Control endpoint bodies are `{}`. Submissions reject unknown properties and requ
 Task fields: id (UUID), command, capability (nullable capability ID), scope (paths and network), approval (kind/source/paths/network/capability or empty on rejection), state, created_at/updated_at (UTC ISO timestamps), events (time/state/message), result (nullable capability-specific object), error (nullable string), evidence (array of verifier objects). Swift TaskRecord/TaskEvent and JSONValue decode the shared wire contract; Python validates submission types at the boundary.
 
 Capability results: apps return bundle_id and effect; files.list returns entries (names only); files.sample returns filename, content, and effect. Evidence includes observed running bundle identifier or independently observed listing, or created path, byte count and SHA-256. All task state writes are committed to SQLite. Tokens are ephemeral and change on relaunch. Phase 1 has no external actions or retry endpoint.
+
+## Phase 2 additions
+
+See PHASE2.md for model status, proposal confirmation, awaiting_approval state, and additive task fields. Unknown requests are now interpreted locally when enabled; they do not execute without owner confirmation.

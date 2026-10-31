@@ -1,6 +1,6 @@
 # JARVIS — local Mac executive
 
-Phase 0–1 implementation: a SwiftUI menu-bar/window app with a supervised Python service, authenticated loopback API, SQLite history, a single task queue, scoped policy checks, and verified demo actions. No model, cloud account, package installation, or recurring subscription is required.
+Phase 0–2 implementation: a SwiftUI menu-bar/window app with a supervised Python service, authenticated loopback API, SQLite history, a single task queue, scoped policy checks, and verified demo actions. The original four commands work without a model. Optional local reasoning uses the installed Ollama + Qwen3 4B model, with no cloud account or recurring subscription.
 
 ## Build and run
 
@@ -20,7 +20,7 @@ The app is `.build/JARVIS.app`. It is ad-hoc signed for local development, not n
 - `list demo folder` (also `list files`)
 - `create sample file` (also `create a sample text file`)
 
-Case and whitespace are normalized. Unknown requests are recorded as failed with supported suggestions and execute nothing. Select a task to see results, authorization, verification evidence, and progress. Stop All pauses dispatch and cancels outstanding tasks; Resume re-enables it. Cancel does not undo completed actions. App launches are checked using NSWorkspace; created files are read back and hashed.
+Case and whitespace are normalized. With local reasoning enabled, other requests are interpreted into a proposed supported action for you to confirm; unsupported or ambiguous requests fail safely. Proposals never execute before confirmation. Select a task to see results, authorization, verification evidence, and progress. Stop All pauses dispatch and cancels outstanding tasks; Resume re-enables it. Cancel does not undo completed actions. App launches are checked using NSWorkspace; created files are read back and hashed.
 
 Runtime data stays in ignored `data/`: SQLite history and `workspace/` sample files. The app does not read your other folders. Closing its window keeps the menu-bar app alive. Quit stops the backend; a crash is shown in the UI with a Restart Executive button. Interrupted tasks are retained but never replayed automatically.
 
@@ -33,4 +33,4 @@ python3 scripts/smoke.py
 
 Tests require loopback networking. The smoke test intentionally opens Calculator and Finder and creates isolated files in `artifacts/smoke-data/workspace/`; results go to `artifacts/smoke-results.json`. Build first. No test sends data externally.
 
-See `docs/STATUS.md` for observed results, `docs/API.md` for the contract, and `docs/RISKS.md` for practical limits. Both original specifications remain unchanged. Voice, local models, second brain, browser control, OpenCode, and Agent Factory are not implemented in this release.
+See `docs/STATUS.md` for observed results, `docs/API.md` for the contract, and `docs/RISKS.md` for practical limits. Both original specifications remain unchanged. See `docs/PHASE2.md` for model setup, resource limits, and the new confirmation flow. Voice, second brain, browser control, OpenCode, and Agent Factory remain future phases.

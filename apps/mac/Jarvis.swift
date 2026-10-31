@@ -21,6 +21,7 @@ struct JSONValue: Decodable {
         }
     }
 }
+struct ProposalInfo: Decodable { let capability: String; let reason: String }
 struct TaskRecord: Decodable, Identifiable {
     let id: String
     let command: String
@@ -34,9 +35,11 @@ struct TaskRecord: Decodable, Identifiable {
     let result: JSONValue?
     let error: String?
     let evidence: [JSONValue]
+    let proposal: ProposalInfo?
     var active: Bool { state == "queued" || state == "running" }
 }
 struct Health: Decodable { let status: String; let paused: Bool }
+struct ModelInfo: Decodable { let model: String; let status: String; let installed: Bool; let available: Bool; let enabled: Bool }
 struct Capability: Decodable, Identifiable { let id: String; let title: String; let commands: [String] }
 
 @MainActor
@@ -50,6 +53,7 @@ final class ExecutiveModel: ObservableObject {
     @Published var selected: String?
     @Published var command = ""
     @Published var submitting = false
+    @Published var modelInfo: ModelInfo?
     private var process: Process?
     private var input: Pipe?
     private var port: Int?
@@ -149,6 +153,7 @@ final class ExecutiveModel: ObservableObject {
     func refresh() async {
         do {
             let health = try JSONDecoder().decode(Health.self, from: await request("health"))
+            modelInfo = try? JSONDecoder().decode(ModelInfo.self, from: await request("model"))
             tasks = try JSONDecoder().decode([TaskRecord].self, from: await request("tasks"))
             if capabilities.isEmpty {
                 capabilities = try JSONDecoder().decode([Capability].self, from: await request("capabilities"))
@@ -197,94 +202,6 @@ final class ExecutiveModel: ObservableObject {
     }
 }
 
-struct CommandWindow: View {
-    @ObservedObject var model: ExecutiveModel
-    var selectedTask: TaskRecord? { model.tasks.first { $0.id == model.selected } }
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "sparkle").font(.title).foregroundStyle(.blue)
-                VStack(alignment: .leading) {
-                    Text("JARVIS").font(.title2.bold())
-                    Text("Your local executive · Phase 1").foregroundStyle(.secondary)
-                }
-                Spacer()
-                Circle().fill(model.connected ? (model.paused ? Color.orange : Color.green) : Color.red).frame(width: 8, height: 8)
-                Text(model.status).font(.caption)
-            }.padding()
-            Divider()
-            HSplitView {
-                List(selection: $model.selected) {
-                    ForEach(model.tasks) { task in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(task.command).lineLimit(2)
-                            Label(task.state.capitalized, systemImage: task.active ? "hourglass" : task.state == "succeeded" ? "checkmark.circle" : "circle")
-                                .font(.caption).foregroundStyle(task.state == "failed" ? .red : .secondary)
-                        }.padding(.vertical, 4).tag(task.id)
-                    }
-                }.frame(minWidth: 210, idealWidth: 245, maxWidth: 300)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if let task = selectedTask {
-                            Text(task.command).font(.title2.bold())
-                            HStack {
-                                Text(task.state.uppercased()).font(.caption.bold())
-                                if task.active { ProgressView().controlSize(.small) }
-                                Spacer()
-                                if task.active { Button("Cancel") { model.action("tasks/\(task.id)/cancel") }.disabled(!model.connected) }
-                            }
-                            if let error = task.error { Text(error).foregroundStyle(.red) }
-                            if let result = task.result { section("Result", result.text) }
-                            if !task.evidence.isEmpty { section("Verified evidence", task.evidence.map(\.text).joined(separator: "\n\n")) }
-                            section("Authorization & scope", task.approval.text + "\n" + task.scope.text)
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Progress log").font(.headline)
-                                ForEach(Array(task.events.enumerated()), id: \.offset) { _, event in
-                                    Text("\(event.time) · \(event.message)").font(.caption).textSelection(.enabled)
-                                }
-                            }
-                        } else {
-                            Text("Ready for a real local task").font(.title2.bold())
-                            Text("Choose a command below. JARVIS records its scope, executes it, and checks the outcome.")
-                            Text("This first release supports four deterministic commands. Voice, models, and agents arrive in later phases.").foregroundStyle(.secondary)
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                }.frame(minWidth: 370)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    ForEach(model.capabilities) { capability in
-                        Button(capability.title) { model.submit(capability.commands[0]) }
-                            .disabled(!model.connected || model.paused || model.submitting)
-                    }
-                }.controlSize(.small)
-                HStack {
-                    TextField("Type a command, e.g. open Calculator", text: $model.command).textFieldStyle(.roundedBorder)
-                        .onSubmit { if model.connected && !model.paused { model.submit() } }
-                    Button("Run") { model.submit() }.keyboardShortcut(.return, modifiers: .command)
-                        .disabled(!model.connected || model.paused || model.submitting || model.command.isEmpty)
-                }
-                if let error = model.error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-                HStack {
-                    Button("Stop All", role: .destructive) { model.action("stop-all") }.disabled(!model.connected)
-                    if model.paused { Button("Resume") { model.action("resume") }.disabled(!model.connected) }
-                    if !model.connected { Button("Restart Executive") { model.start() } }
-                    Spacer()
-                    Text("No cloud connection · Workspace-scoped files").font(.caption).foregroundStyle(.secondary)
-                    Button("Quit") { NSApplication.shared.terminate(nil) }
-                }
-            }.padding()
-        }.frame(minWidth: 760, minHeight: 530)
-    }
-    func section(_ title: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.headline)
-            Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-        }
-    }
-}
-
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: ExecutiveModel?
@@ -299,7 +216,7 @@ struct JarvisApp: App {
     var body: some Scene {
         Window("JARVIS", id: "command") {
             CommandWindow(model: model).onAppear { delegate.model = model }
-        }.defaultSize(width: 900, height: 640)
+        }.defaultSize(width: 1120, height: 780)
         MenuBarExtra("JARVIS", systemImage: "sparkle") {
             MenuContent(model: model)
         }

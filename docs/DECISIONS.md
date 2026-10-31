@@ -9,3 +9,11 @@
 - KEEP: ad-hoc local signing only. App configuration contains absolute source/data and existing Python paths; distribution and relocation are deferred.
 
 Discovery: MacBook Air Mac17,3; Apple M5; 16 GB memory; macOS 27.0.1; Swift 6.4; Python 3.14.6; SQLite 3.50.4; Git 2.54.0; approximately 139 GiB free at inspection. The initial sysctl query was restricted; system_profiler confirmed chip and RAM. No microphone permission was requested because voice is deferred.
+
+## Phase 2 decisions
+
+- MODIFY: owner requested a more technical interface; retain native SwiftUI and real telemetry while adding a dark cyan command-center design.
+- KEEP: deterministic routing before local inference.
+- MODIFY: natural-language interpretations require explicit confirmation before the existing adapter executes; model output never acts as authorization.
+- KEEP: small quantized Qwen3 4B model as first measured candidate on the confirmed 16 GB Mac; strict local-only runtime and bounded single-model concurrency. Owner explicitly authorized installation.
+- MODIFY: use the official Ollama application executable directly because the optional system CLI shortcut requires admin access. No admin credential is necessary for JARVIS.

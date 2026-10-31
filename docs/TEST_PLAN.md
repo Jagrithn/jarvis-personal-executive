@@ -9,3 +9,7 @@ Real Mac smoke opens Calculator and Finder and verifies bundle IDs with NSWorksp
 Native UI checks: initial connected state, create sample via suggestion, inspect result/evidence/authorization, Stop All disables commands, Resume re-enables, forced backend crash changes UI to stopped and disables commands, Restart Executive reconnects with preserved history, quit/relaunch retains history. Inspect layout with the native screenshot tool. No Accessibility permission is needed by JARVIS itself.
 
 Service tests need local network binding. The Codex execution sandbox initially denied bind; rerunning with permitted loopback networking passed. This is an execution-environment limitation, not a reason to weaken runtime authentication.
+
+## Phase 2 additions
+
+`test_reasoning.py` covers untrusted JSON shapes, compound/negated requests, no execution before confirmation, reject/stop behavior, model refusal and unavailable runtime, scope enforcement, deterministic bypass, and real subprocess cancellation/input handling. API tests exercise authenticated approval and duplicate rejection. `benchmark_model.py` tests 20 real requests without executing them; `smoke_reasoning.py` separately tests the live proposal→confirmation→verified-file flow. See STATUS.md for final measurements and the initial model error.

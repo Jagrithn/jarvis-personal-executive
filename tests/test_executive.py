@@ -141,7 +141,23 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.call('/v1/health', extra={'Host': 'evil.example'})[0], 403)
         self.assertEqual(self.call('/v1/health')[1]['status'], 'ok')
         self.assertEqual(len(self.call('/v1/capabilities')[1]), 4)
+        self.assertFalse(self.call('/v1/model')[1]['enabled'])
         self.assertEqual(self.call('/v1/nope')[0], 404)
+    def test_proposal_approval_endpoints(self):
+        from test_reasoning import FakeReasoner
+        self.engine.reasoner = FakeReasoner()
+        _, task = self.call('/v1/tasks', {'command': 'Make a demo document please'})
+        for _ in range(100):
+            record = self.call('/v1/tasks/' + task['id'])[1]
+            if record['state'] == 'awaiting_approval':
+                break
+            time.sleep(.01)
+        self.assertEqual(record['state'], 'awaiting_approval')
+        self.assertFalse(list(self.engine.root.iterdir()))
+        self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {}, token='bad')[0], 401)
+        self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {})[0], 200)
+        self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {})[0], 400)
+
     def test_task_and_control_endpoints(self):
         code, task = self.call('/v1/tasks', {'command': 'list files'})
         self.assertEqual(code, 200)

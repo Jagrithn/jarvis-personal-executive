@@ -15,17 +15,19 @@ from adapters import execute, Cancelled
 from policy import CAPABILITIES, route, authorize
 from store import Store
 from verification import verify
+from reasoning import LocalReasoner
 
 TERMINAL = {'succeeded', 'failed', 'cancelled', 'interrupted'}
 def now():
     return datetime.now(timezone.utc).isoformat()
 
 class Executive:
-    def __init__(self, data, helper, executor=execute, checker=verify):
+    def __init__(self, data, helper, executor=execute, checker=verify, reasoner=None):
         data.mkdir(parents=True, exist_ok=True)
         self.root = data / 'workspace'
         self.root.mkdir(exist_ok=True)
         self.helper, self.executor, self.checker = helper, executor, checker
+        self.reasoner = reasoner or LocalReasoner(data)
         self.store = Store(data / 'tasks.sqlite3')
         self.tasks = {t['id']: t for t in self.store.all()}
         self.lock = threading.RLock()
@@ -57,10 +59,21 @@ class Executive:
                 raise ValueError('Dispatch is paused; Resume before submitting work')
             task = {'id': str(uuid.uuid4()), 'command': body['command'], 'capability': None,
                     'scope': {}, 'approval': {}, 'state': 'queued', 'created_at': now(),
-                    'updated_at': now(), 'events': [], 'result': None, 'error': None, 'evidence': []}
+                    'updated_at': now(), 'events': [], 'result': None, 'error': None, 'evidence': [],
+                    'requested_path': body.get('path'), 'proposal': None}
             self.tasks[task['id']] = task
             try:
-                task['capability'] = route(body['command'])
+                try:
+                    task['capability'] = route(body['command'])
+                except ValueError:
+                    if not self.reasoner.enabled:
+                        raise
+                    # Validate requested path before passing intent to local inference.
+                    authorize(self.root, 'files.list', body.get('path'))
+                    self.cancels[task['id']] = threading.Event()
+                    self.transition(task, 'queued', 'Awaiting local interpretation; no action authorized')
+                    self.queue.put(task['id'])
+                    return self.snapshot(task)
                 grant = authorize(self.root, task['capability'], body.get('path'))
                 task['approval'] = grant
                 task['scope'] = {'paths': grant['paths'], 'network': False}
@@ -81,11 +94,25 @@ class Executive:
             task = self.tasks[task_id]
             if task['state'] not in TERMINAL:
                 self.cancels[task_id].set()
-                if task['state'] == 'queued':
+                if task['state'] in {'queued', 'awaiting_approval'}:
                     self.transition(task, 'cancelled', 'Cancelled before execution')
                 else:
                     task['events'].append({'time': now(), 'state': task['state'], 'message': 'Cancellation requested; completed effects are retained'})
                     self.store.save(task)
+            return self.snapshot(task)
+
+    def approve(self, task_id):
+        with self.lock:
+            task = self.tasks[task_id]
+            if self.paused or self.closing:
+                raise ValueError('Dispatch is paused')
+            if task['state'] != 'awaiting_approval':
+                raise ValueError('Task is not awaiting approval')
+            grant = authorize(self.root, task['capability'], task.get('requested_path'))
+            grant['source'] = 'owner confirmed local model proposal'
+            task['approval'] = grant
+            self.transition(task, 'queued', 'Owner confirmed proposed action')
+            self.queue.put(task_id)
             return self.snapshot(task)
 
     def stop(self):
@@ -105,9 +132,23 @@ class Executive:
                 if task['state'] != 'queued':
                     continue
                 event = self.cancels[key]
-                self.transition(task, 'running', 'Executing allowlisted adapter')
+                self.transition(task, 'running', 'Interpreting locally' if task['capability'] is None else 'Executing allowlisted adapter')
             try:
-                authorize(self.root, task['capability'])
+                if task['capability'] is None:
+                    proposal = self.reasoner.propose(task['command'], event)
+                    with self.lock:
+                        task['proposal'] = proposal
+                        if event.is_set():
+                            raise Cancelled('Cancelled during interpretation; no action executed')
+                        if proposal['capability'] == 'none':
+                            raise ValueError('Cannot safely determine a supported action: ' + proposal['reason'])
+                        grant = authorize(self.root, proposal['capability'], task.get('requested_path'))
+                        task['capability'] = proposal['capability']
+                        task['scope'] = {'paths': grant['paths'], 'network': False}
+                        task['approval'] = {'kind': 'pending', 'source': 'model proposal requires owner confirmation'}
+                        self.transition(task, 'awaiting_approval', 'Proposed ' + CAPABILITIES[task['capability']][0] + '; confirm before execution')
+                    continue
+                authorize(self.root, task['capability'], task.get('requested_path'))
                 result = self.executor(task['capability'], self.root, event, self.helper)
                 with self.lock:
                     task['result'] = result
@@ -129,6 +170,7 @@ class Executive:
         self.worker.join(timeout=15)
         if self.worker.is_alive():
             raise RuntimeError('Worker failed to stop')
+        self.reasoner.close()
         self.store.close()
 
 class Server(ThreadingHTTPServer):
@@ -177,6 +219,8 @@ class Handler(BaseHTTPRequestHandler):
             with engine.lock:
                 if not post and path == '/v1/health':
                     result = {'status': 'ok', 'api_version': 1, 'paused': engine.paused}
+                elif not post and path == '/v1/model':
+                    result = engine.reasoner.describe()
                 elif not post and path == '/v1/capabilities':
                     result = [{'id': k, 'title': v[0], 'commands': v[1]} for k, v in CAPABILITIES.items()]
                 elif not post and path == '/v1/tasks':
@@ -187,6 +231,8 @@ class Handler(BaseHTTPRequestHandler):
                     parts = path.split('/')
                     if len(parts) == 4 and not post:
                         result = engine.snapshot(engine.tasks[parts[3]])
+                    elif len(parts) == 5 and parts[4] == 'approve' and post:
+                        result = engine.approve(parts[3])
                     elif len(parts) == 5 and parts[4] == 'cancel' and post:
                         result = engine.cancel(parts[3])
                     else:
