@@ -1,36 +1,57 @@
 # JARVIS — local Mac executive
 
-Phase 0–2 implementation: a SwiftUI menu-bar/window app with a supervised Python service, authenticated loopback API, SQLite history, a single task queue, scoped policy checks, and verified demo actions. The original four commands work without a model. Optional local reasoning uses the installed Ollama + Qwen3 4B model, with no cloud account or recurring subscription.
+A native SwiftUI command center and menu-bar app with authenticated loopback Python service, persistent tasks, scoped permissions, cancellation, approvals and evidence. It uses isolated OpenJarvis memory/inference primitives, Ollama/Qwen3 4B for local conversation, and fixed adapters for actions. It is a development build, not a completed universal autonomous assistant.
 
-## Build and run
-
-From this repository:
+## Run
 
 ```sh
 ./scripts/build.sh
 ./scripts/run.sh
 ```
 
-The app is `.build/JARVIS.app`. It is ad-hoc signed for local development, not notarized for distribution. Build requires the installed Xcode Command Line Tools, Python 3.14, and macOS 14 or newer; tested only on macOS 27.0.1 / Apple M5. The package records the Python and repository paths at build time: rebuild after moving the repository or changing Python.
+App: `.build/JARVIS.app`. Requires macOS, Swift/Xcode command-line tools and system Python; this machine has the additional runtimes installed. Rebuild after moving the project: the app stores the repository/Python paths. Ad-hoc signed; not notarized. Backend modules are mostly portable, but the native UI, app launch, voice and coding sandbox currently require macOS.
 
 ## Commands
 
-- `open calculator`
-- `open finder`
-- `list demo folder` (also `list files`)
-- `create sample file` (also `create a sample text file`)
+| Capability | Command |
+|---|---|
+| Original verified actions | `open calculator`, `open finder`, `list files`, `create sample file` |
+| Local conversation | Ask `What can you do?` directly; `chat:` remains available for other wording |
+| Index top-level workspace .txt/.md notes | `index workspace` — confirm first |
+| Search / grounded answer | `search memory: Aurora`, `ask memory: What is the deadline?` |
+| Review / export / forget | `review memory`, `export memory`, `forget memory` |
+| Public static web page | `read page: https://example.com` — confirm first |
+| Source digest / draft / organization proposal | `create research report`, `draft workspace summary`, `plan file organization` |
+| Register fixed worker | `register worker: research-reporter` or `register worker: file-organizer` — confirm first |
+| Worker inventory / execution | `list workers`, `run worker: research-reporter` |
+| Recurring worker | `schedule worker: research-reporter every 3600` — seconds, confirm first |
+| Schedule controls | `list schedules`, `cancel schedule: <id>`, `resume schedules` |
+| Experimental sandboxed OpenCode | `build demo app` — confirm first; fails closed if sandbox/runtime checks fail |
 
-Case and whitespace are normalized. With local reasoning enabled, other requests are interpreted into a proposed supported action for you to confirm; unsupported or ambiguous requests fail safely. Proposals never execute before confirmation. Select a task to see results, authorization, verification evidence, and progress. Stop All pauses dispatch and cancels outstanding tasks; Resume re-enables it. Cancel does not undo completed actions. App launches are checked using NSWorkspace; created files are read back and hashed.
+**Mic** starts local recognition; **Stop mic** transfers the transcript to the command draft for review. **Read result** speaks a selected result locally. Voice support depends on installed on-device language assets. See [voice details](docs/VOICE.md).
 
-Runtime data stays in ignored `data/`: SQLite history and `workspace/` sample files. The app does not read your other folders. Closing its window keeps the menu-bar app alive. Quit stops the backend; a crash is shown in the UI with a Restart Executive button. Interrupted tasks are retained but never replayed automatically.
+Only explicitly requested workspace notes are indexed. Stale source excerpts are withheld until reindexing. Forget clears the index, not originals, task history or exported copies. Model answers are not independently verified facts. Reports are deterministic quoted-source digests, drafts are never sent, organization plans never move originals, and workers are fixed templates rather than arbitrary generated agents.
+
+**Stop All** pauses dispatch and schedules and cancels outstanding tasks; completed effects remain. **Resume** re-enables ordinary tasks; use approved `resume schedules` to restart recurring work. Schedules pause on app restart and run only while JARVIS is open. No login startup, external accounts or messaging configured.
+
+## Dependencies and setup
+
+- Chat template: after opening JARVIS, run `scripts/setup-chat-model.sh` to create `jarvis-chat:4b` from existing weights.
+- Existing Ollama + Qwen3 setup: [Phase 2](docs/PHASE2.md).
+- Native OpenJarvis runtime: `scripts/setup-openjarvis.sh` pins source and reapplies [reviewed safety patch](patches/openjarvis-safety.patch). Requires uv and Rust; bootstrap script syntax is checked, a fresh-machine rebuild is not yet demonstrated.
+- Browser: `scripts/setup-browser.sh` installs pinned Playwright/Chromium and certificate bundle into ignored `.runtime/`.
+- Hermes/OpenClaw: [local agent installation](docs/LOCAL_AGENTS.md); installed separately, not granted JARVIS permissions.
+
+`data/`, `.runtime/`, `vendor/`, `.build/` and evidence artifacts are ignored. Git alone does not transfer downloaded models or runtimes.
 
 ## Verify
 
 ```sh
 ./scripts/test.sh
+./scripts/test-openjarvis.sh
+.runtime/browser/bin/python -m unittest discover -s tests -p test_browser.py -v
 python3 scripts/smoke.py
+python3 scripts/smoke_extended.py
 ```
 
-Tests require loopback networking. The smoke test intentionally opens Calculator and Finder and creates isolated files in `artifacts/smoke-data/workspace/`; results go to `artifacts/smoke-results.json`. Build first. No test sends data externally.
-
-See `docs/STATUS.md` for observed results, `docs/API.md` for the contract, and `docs/RISKS.md` for practical limits. Both original specifications remain unchanged. See `docs/PHASE2.md` for model setup, resource limits, and the new confirmation flow. Voice, second brain, browser control, OpenCode, and Agent Factory remain future phases.
+Tests need loopback access. Mac smoke opens Calculator/Finder. Extended smoke uses disposable notes and makes one public HTTPS request to example.com. See [status and remaining milestones](docs/STATUS.md), [API](docs/API.md), [browser](docs/BROWSER.md), and [workflows/scheduling](docs/WORKFLOWS.md).

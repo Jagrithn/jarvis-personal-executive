@@ -10,10 +10,11 @@ import urllib.request
 from adapters import run_process
 from policy import CAPABILITIES
 
-MODEL = 'qwen3:4b'
+MODEL = 'qwen2.5:7b'
 BASE = 'http://127.0.0.1:11435'
+ROUTABLE = ['apps.calculator', 'apps.finder', 'files.list', 'files.sample']
 SCHEMA = {'type': 'object', 'additionalProperties': False,
-          'properties': {'capability': {'type': 'string', 'enum': list(CAPABILITIES) + ['none']},
+          'properties': {'capability': {'type': 'string', 'enum': ROUTABLE + ['none']},
                          'reason': {'type': 'string'}},
           'required': ['capability', 'reason']}
 SYSTEM = '''You classify a request into ONE existing local capability, or none.
@@ -31,7 +32,7 @@ with a brief reason describing the match or explaining what is unsupported.'''
 def validate(proposal):
     if not isinstance(proposal, dict) or set(proposal) != {'capability', 'reason'}:
         raise ValueError('Model response did not match the required schema')
-    if proposal['capability'] not in list(CAPABILITIES) + ['none']:
+    if proposal['capability'] not in ROUTABLE + ['none']:
         raise ValueError('Model proposed an unavailable capability')
     if not isinstance(proposal['reason'], str) or not 1 <= len(proposal['reason']) <= 1000:
         raise ValueError('Model response has an invalid reason')

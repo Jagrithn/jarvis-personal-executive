@@ -23,3 +23,13 @@ Capability results: apps return bundle_id and effect; files.list returns entries
 ## Phase 2 additions
 
 See PHASE2.md for model status, proposal confirmation, awaiting_approval state, and additive task fields. Unknown requests are now interpreted locally when enabled; they do not execute without owner confirmation.
+
+## Extended capabilities
+
+All new actions use the same task submission/detail/approval/cancellation contract. `POST /tasks/{id}/approve` confirms a pending task exactly once. `GET /model` reports local model availability. The capability inventory is dynamic; clients must not assume four or eight entries. `health.scheduler_error` is nullable and exposes durable scheduling failures.
+
+Pending confirmation is mandatory for memory indexing/forget, public page reads, worker registration, coding builds, schedule creation and schedule resume. Browser scope has `network: true`; all other capabilities have no external-network grant (local inference uses loopback). Authorization details are visible in the confirmation panel. Memory and registry SQLite state are maintained in the configured data directory in addition to artifact paths under workspace.
+
+Commands/results are documented in README.md. States include `awaiting_approval`, `queued`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. New memory search results include `stale_sources`; rejected memory excerpts/answers are withheld from normal output. Browser evidence verifies captured-text integrity only. Coding evidence is limited to passive HTML structure and sandbox probes; it is not a functional application test.
+
+Stop All pauses schedules even if no task is running. A schedule-persistence error is reported but never prevents task cancellation. Ordinary Resume does not resume schedules. Scheduler occurrences are reserved before submission, are never automatically retried, and do not overlap for the same schedule. On restart all active schedules become paused; missed occurrences are skipped after explicit resume.

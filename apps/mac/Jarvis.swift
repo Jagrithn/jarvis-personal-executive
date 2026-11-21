@@ -8,6 +8,19 @@ struct TaskEvent: Decodable {
 }
 struct JSONValue: Decodable {
     let text: String
+    private var answerForSpeech: String? = nil
+    private static func briefSpeech(_ value: String) -> String {
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return clean }
+        let firstSentence = clean.firstIndex(where: { ".!?".contains($0) })
+            .map { String(clean[...$0]) } ?? clean
+        if firstSentence.count <= 220 { return firstSentence }
+        let prefix = String(firstSentence.prefix(217))
+        let completeWords = prefix[..<(prefix.lastIndex(of: " ") ?? prefix.endIndex)]
+        return String(completeWords) + "…"
+    }
+    var spokenText: String { Self.briefSpeech(answerForSpeech ?? text) }
+    var automaticReply: String? { answerForSpeech.map(Self.briefSpeech) }
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
         if c.decodeNil() { text = "—" }
@@ -17,7 +30,14 @@ struct JSONValue: Decodable {
         else if let a = try? c.decode([JSONValue].self) { text = a.map(\.text).joined(separator: "\n") }
         else {
             let d = try c.decode([String: JSONValue].self)
-            text = d.keys.sorted().map { "\($0): \(d[$0]!.text)" }.joined(separator: "\n")
+            if let answer = d["answer"] {
+                answerForSpeech = answer.text
+                text = answer.text + "\n\n" + (d["notice"]?.text ?? "")
+                    + ((d["sources"]?.text.isEmpty == false) ? "\n\nSOURCES\n" + d["sources"]!.text : "")
+            } else {
+                answerForSpeech = d["message"]?.text
+                text = d.keys.sorted().map { "\($0): \(d[$0]!.text)" }.joined(separator: "\n")
+            }
         }
     }
 }
@@ -39,6 +59,7 @@ struct TaskRecord: Decodable, Identifiable {
     var active: Bool { state == "queued" || state == "running" }
 }
 struct Health: Decodable { let status: String; let paused: Bool }
+struct MemoryFolder: Decodable { let path: String; let kind: String }
 struct ModelInfo: Decodable { let model: String; let status: String; let installed: Bool; let available: Bool; let enabled: Bool }
 struct Capability: Decodable, Identifiable { let id: String; let title: String; let commands: [String] }
 
@@ -51,23 +72,48 @@ final class ExecutiveModel: ObservableObject {
     @Published var paused = false
     @Published var error: String?
     @Published var selected: String?
+    @Published var showingHistory = false
     @Published var command = ""
     @Published var submitting = false
     @Published var modelInfo: ModelInfo?
+    @Published var memoryFolder: MemoryFolder?
+    let voice = VoiceController()
     private var process: Process?
     private var input: Pipe?
     private var port: Int?
     private var token = ""
     private var polling: Task<Void, Never>?
     private var starting = false
+    private var speechEpoch = 0
+    private var pendingReplies: [String] = []
+    private var nextModelRefresh = Date.distantPast
 
-    init() { start() }
+    private func speakReadyReply() {
+        guard !paused, !voice.recording, !voice.preparing, !voice.speaking else { return }
+        while let id = pendingReplies.first {
+            guard let task = tasks.first(where: { $0.id == id }),
+                  !task.active, task.state != "awaiting_approval" else { return }
+            pendingReplies.removeFirst()
+            if task.state == "succeeded", let reply = task.result?.automaticReply {
+                voice.speak(reply)
+                return
+            }
+        }
+    }
+
+    init() {
+        start()
+        if (UserDefaults.standard.object(forKey: "JARVISHandsFreeEnabled") as? Bool) ?? true {
+            toggleHandsFree()
+        }
+    }
 
     func start() {
         guard !starting, process?.isRunning != true else { return }
         starting = true
         error = nil
         status = "Starting executive…"
+        nextModelRefresh = .distantPast
         token = UUID().uuidString + UUID().uuidString
         guard let resources = Bundle.main.resourceURL,
               let configData = try? Data(contentsOf: resources.appendingPathComponent("config.json")),
@@ -81,6 +127,9 @@ final class ExecutiveModel: ObservableObject {
         child.executableURL = URL(fileURLWithPath: python)
         child.arguments = [resources.appendingPathComponent("executive/server.py").path,
                            "--data", root + "/data", "--helper", resources.appendingPathComponent("verify-app").path]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        child.environment = environment
         let out = Pipe(), incoming = Pipe()
         child.standardOutput = out
         child.standardInput = incoming
@@ -90,6 +139,7 @@ final class ExecutiveModel: ObservableObject {
         child.terminationHandler = { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.voice.stopAll()
                 self.connected = false
                 self.port = nil
                 self.starting = false
@@ -115,7 +165,8 @@ final class ExecutiveModel: ObservableObject {
                 self.polling = Task { [weak self] in
                     while !Task.isCancelled {
                         await self?.refresh()
-                        try? await Task.sleep(for: .milliseconds(700))
+                        let interval = self?.pendingReplies.isEmpty == false ? 250 : 700
+                        try? await Task.sleep(for: .milliseconds(interval))
                     }
                 }
             }
@@ -153,16 +204,27 @@ final class ExecutiveModel: ObservableObject {
     func refresh() async {
         do {
             let health = try JSONDecoder().decode(Health.self, from: await request("health"))
-            modelInfo = try? JSONDecoder().decode(ModelInfo.self, from: await request("model"))
+            if Date() >= nextModelRefresh {
+                modelInfo = try? JSONDecoder().decode(ModelInfo.self, from: await request("model"))
+                nextModelRefresh = Date().addingTimeInterval(8)
+            }
+            if memoryFolder == nil {
+                memoryFolder = try? JSONDecoder().decode(MemoryFolder.self, from: await request("memory/folder"))
+            }
             tasks = try JSONDecoder().decode([TaskRecord].self, from: await request("tasks"))
             if capabilities.isEmpty {
                 capabilities = try JSONDecoder().decode([Capability].self, from: await request("capabilities"))
             }
             connected = health.status == "ok"
             paused = health.paused
+            speakReadyReply()
+            if !tasks.contains(where: \.active) && !submitting { voice.resumeHandsFreeIfNeeded() }
             status = paused ? "Executive paused" : "Executive connected · local only"
         } catch {
+            if connected { voice.stopAll() }
             connected = false
+            modelInfo = nil
+            nextModelRefresh = .distantPast
             status = "Executive disconnected"
         }
     }
@@ -171,6 +233,7 @@ final class ExecutiveModel: ObservableObject {
         let text = phrase ?? command
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         submitting = true
+        let epoch = speechEpoch
         error = nil
         Task {
             defer { submitting = false }
@@ -178,12 +241,49 @@ final class ExecutiveModel: ObservableObject {
                 let record = try JSONDecoder().decode(TaskRecord.self, from: await request("tasks", body: ["command": text]))
                 command = ""
                 selected = record.id
+                if epoch == speechEpoch { pendingReplies.append(record.id) }
                 await refresh()
             } catch { self.error = error.localizedDescription }
         }
     }
 
+    func toggleHandsFree() {
+        voice.toggleHandsFree { [weak self] command in
+            guard let self, self.connected, !self.paused else { return }
+            self.submit(command)
+        }
+        UserDefaults.standard.set(voice.handsFreeEnabled, forKey: "JARVISHandsFreeEnabled")
+    }
+
+    func chooseMemoryFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder for JARVIS memory"
+        panel.message = "JARVIS indexes text, Markdown and selectable-text PDFs in this folder and subfolders after you run Index workspace."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setMemoryFolder(url.path)
+    }
+
+    func setMemoryFolder(_ path: String) {
+        Task {
+            do {
+                let data = try await request("memory/folder", body: ["path": path])
+                memoryFolder = try JSONDecoder().decode(MemoryFolder.self, from: data)
+                error = nil
+                command = "index workspace"
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+
     func action(_ path: String) {
+        if path == "stop-all" {
+            speechEpoch += 1
+            pendingReplies.removeAll()
+            voice.stopAll()
+            UserDefaults.standard.set(false, forKey: "JARVISHandsFreeEnabled")
+        }
         Task {
             do { _ = try await request(path, body: [:]); await refresh() }
             catch { self.error = error.localizedDescription }
@@ -191,6 +291,9 @@ final class ExecutiveModel: ObservableObject {
     }
 
     func shutdown() {
+        speechEpoch += 1
+        pendingReplies.removeAll()
+        voice.stopAll()
         polling?.cancel()
         // EOF on the private pipe causes graceful backend stop/cancel and shutdown.
         try? input?.fileHandleForWriting.close()
@@ -215,8 +318,11 @@ struct JarvisApp: App {
     @StateObject private var model = ExecutiveModel()
     var body: some Scene {
         Window("JARVIS", id: "command") {
-            CommandWindow(model: model).onAppear { delegate.model = model }
+            CommandWindow(model: model, voice: model.voice).onAppear { delegate.model = model }
         }.defaultSize(width: 1120, height: 780)
+        Window("JARVIS Companion", id: "companion") {
+            CompanionWindow(model: model)
+        }.defaultSize(width: 280, height: 285)
         MenuBarExtra("JARVIS", systemImage: "sparkle") {
             MenuContent(model: model)
         }
@@ -228,7 +334,9 @@ struct MenuContent: View {
     var body: some View {
         Text(model.status)
         Button("Open JARVIS") { openWindow(id: "command"); NSApp.activate(ignoringOtherApps: true) }
-        Button("Stop All") { model.action("stop-all") }.disabled(!model.connected)
+        Button("Show floating companion") { openWindow(id: "companion") }
+        Button(model.voice.handsFreeEnabled ? "Turn hands-free off" : "Turn hands-free on") { model.toggleHandsFree() }
+        Button("Stop All") { model.action("stop-all") }
         if model.paused { Button("Resume") { model.action("resume") } }
         Divider()
         Button("Quit JARVIS") { NSApp.terminate(nil) }

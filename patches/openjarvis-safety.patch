@@ -1,0 +1,161 @@
+diff --git a/src/openjarvis/server/agent_manager_routes.py b/src/openjarvis/server/agent_manager_routes.py
+index 26fccce..202b958 100644
+--- a/src/openjarvis/server/agent_manager_routes.py
++++ b/src/openjarvis/server/agent_manager_routes.py
+@@ -1,3 +1,4 @@
++# Modified for JARVIS Personal: unattended routes fail closed on confirmations.
+ """FastAPI routes for the Agent Manager."""
+ 
+ from __future__ import annotations
+@@ -1029,7 +1030,7 @@ async def _stream_managed_agent(
+                     max_turns=int(config.get("max_turns", 8)),
+                     temperature=float(config.get("temperature", 0.3)),
+                     interactive=True,
+-                    confirm_callback=lambda _prompt: True,
++                    confirm_callback=lambda _prompt: False,
+                 )
+                 if resolved_toolkit.mcp_clients:
+                     dr_agent._mcp_clients = resolved_toolkit.mcp_clients
+@@ -1318,7 +1319,7 @@ async def _stream_managed_agent(
+         tools=resolved_toolkit.instances,
+         bus=bus,
+         interactive=True,
+-        confirm_callback=lambda _prompt: True,
++        confirm_callback=lambda _prompt: False,
+         capability_policy=getattr(app_state, "capability_policy", None),
+         rate_limiter=getattr(app_state, "rate_limiter", None),
+         agent_id=agent_id,
+@@ -1889,7 +1890,7 @@ def create_agent_manager_router(
+                                     ),
+                                     agent_id=agent_id,
+                                     interactive=True,
+-                                    confirm_callback=lambda _prompt: True,
++                                    confirm_callback=lambda _prompt: False,
+                                 )
+ 
+                                 def handler(text: str) -> str:
+@@ -1972,7 +1973,7 @@ def create_agent_manager_router(
+                                     ),
+                                     agent_id=agent_id,
+                                     interactive=True,
+-                                    confirm_callback=lambda _prompt: True,
++                                    confirm_callback=lambda _prompt: False,
+                                 )
+                         bus = getattr(request.app.state, "bus", None)
+                         if bus is None:
+diff --git a/src/openjarvis/tools/file_write.py b/src/openjarvis/tools/file_write.py
+index 4f9ebe8..7e991ae 100644
+--- a/src/openjarvis/tools/file_write.py
++++ b/src/openjarvis/tools/file_write.py
+@@ -1,3 +1,4 @@
++# Modified for JARVIS Personal: require explicit write confirmation.
+ """File write tool — write content to files with path validation."""
+ 
+ from __future__ import annotations
+@@ -63,6 +64,7 @@ class FileWriteTool(BaseTool):
+                 "required": ["path", "content"],
+             },
+             category="filesystem",
++            requires_confirmation=True,
+             required_capabilities=["file:write"],
+         )
+ 
+diff --git a/src/openjarvis/tools/shell_exec.py b/src/openjarvis/tools/shell_exec.py
+index 44bca54..e44030a 100644
+--- a/src/openjarvis/tools/shell_exec.py
++++ b/src/openjarvis/tools/shell_exec.py
+@@ -1,9 +1,12 @@
++# Modified for JARVIS Personal: do not discard status or bypass env/timeout through Rust.
+ """Shell execution tool — run shell commands with security constraints."""
+ 
+ from __future__ import annotations
+ 
+ import os
+ import subprocess
++import signal
++import threading
+ from pathlib import Path
+ from typing import Any, List
+ 
+@@ -20,6 +23,39 @@ _MAX_TIMEOUT = 300
+ # Default timeout (seconds)
+ _DEFAULT_TIMEOUT = 30
+ 
++
++def _run_bounded(command, timeout, cwd, env):
++    """Drain output with bounded memory and reap the macOS process group."""
++    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
++                               stderr=subprocess.PIPE, cwd=cwd, env=env,
++                               start_new_session=os.name == "posix")
++    buffers = [bytearray(), bytearray()]
++    def drain(stream, buffer):
++        with stream:
++            while data := stream.read(4096):
++                buffer.extend(data[:max(0, _MAX_OUTPUT_BYTES + 1 - len(buffer))])
++    readers = [threading.Thread(target=drain, args=(stream, buffer), daemon=True)
++               for stream, buffer in zip((process.stdout, process.stderr), buffers)]
++    for reader in readers:
++        reader.start()
++    try:
++        process.wait(timeout=timeout)
++    finally:
++        # Reap descendants even when a shell exits before its background child.
++        try:
++            if os.name == "posix":
++                os.killpg(process.pid, signal.SIGKILL)
++            elif process.poll() is None:
++                process.kill()
++        except ProcessLookupError:
++            pass
++        process.wait()
++        for reader in readers:
++            reader.join(timeout=2)
++    return subprocess.CompletedProcess(command, process.returncode,
++                                       buffers[0].decode('utf-8', errors='replace'),
++                                       buffers[1].decode('utf-8', errors='replace'))
++
+ # Environment variables always passed through on every platform.
+ _PORTABLE_ENV_KEYS = (
+     "PATH",
+@@ -148,40 +184,9 @@ class ShellExecTool(BaseTool):
+                 env[key] = val
+ 
+         try:
+-            from openjarvis._rust_bridge import get_rust_module
+-
+-            _rust = get_rust_module()
+-            output = _rust.ShellExecTool().execute(command, working_dir)
+-            return ToolResult(
+-                tool_name="shell_exec",
+-                content=output or "(no output)",
+-                success=True,
+-                metadata={
+-                    "returncode": 0,
+-                    "timeout_used": timeout,
+-                    "working_dir": working_dir,
+-                },
+-            )
+-        except ImportError:
+-            pass  # Fall through to subprocess below
+-        except Exception as exc:
+-            return ToolResult(
+-                tool_name="shell_exec",
+-                content=str(exc),
+-                success=False,
+-                metadata={
+-                    "returncode": -1,
+-                    "timeout_used": timeout,
+-                    "working_dir": working_dir,
+-                },
+-            )
+-        try:
+-            result = subprocess.run(
++            result = _run_bounded(
+                 command,
+                 # This tool executes shell commands after its confirmation gate.
+-                shell=True,  # nosec B602
+-                capture_output=True,
+-                text=True,
+                 timeout=timeout,
+                 cwd=working_dir,
+                 env=env,

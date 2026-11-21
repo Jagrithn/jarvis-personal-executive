@@ -2,11 +2,11 @@ import SwiftUI
 import AppKit
 
 private enum HUD {
-    static let cyan = Color(red: 0.25, green: 0.88, blue: 0.96)
-    static let ink = Color(red: 0.025, green: 0.045, blue: 0.075)
-    static let panel = Color(red: 0.045, green: 0.075, blue: 0.115)
-    static let muted = Color(red: 0.49, green: 0.61, blue: 0.70)
-    static let line = cyan.opacity(0.17)
+    static let cyan = Color(red: 0.51, green: 0.72, blue: 0.76)
+    static let ink = Color(red: 0.035, green: 0.047, blue: 0.061)
+    static let panel = Color(red: 0.065, green: 0.080, blue: 0.100)
+    static let muted = Color(red: 0.57, green: 0.65, blue: 0.69)
+    static let line = cyan.opacity(0.11)
 }
 private struct HUDButton: ButtonStyle {
     var primary = false
@@ -38,48 +38,100 @@ private struct CoreDisplay: View {
     let connected: Bool
     let paused: Bool
     let active: Int
-    var tint: Color { !connected ? .red : paused ? .orange : HUD.cyan }
+    var listening = false
+    var speaking = false
+    var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var tint: Color { !connected ? HUD.muted : paused ? .orange : HUD.cyan }
+    private static let nodes: [(Double, Double, Double)] = (0..<120).map { index in
+        let y = 1.0 - (Double(index) + 0.5) * 2.0 / 120.0
+        let radius = sqrt(max(0, 1 - y * y))
+        let theta = Double(index) * 2.3999632297
+        return (cos(theta) * radius, y * 0.84, sin(theta) * radius * 0.84)
+    }
+    private static let edges: [(Int, Int)] = {
+        var result: [(Int, Int)] = []
+        for i in nodes.indices {
+            for j in (i + 1)..<nodes.count {
+                let a = nodes[i], b = nodes[j]
+                let distance = pow(a.0-b.0, 2) + pow(a.1-b.1, 2) + pow(a.2-b.2, 2)
+                if distance < 0.16 { result.append((i, j)) }
+            }
+        }
+        return result
+    }()
     var body: some View {
         ZStack {
-            Circle().fill(tint.opacity(0.045)).frame(width: 210, height: 210)
-            Circle().stroke(tint.opacity(0.16), lineWidth: 1).frame(width: 210, height: 210)
-            Circle().stroke(tint.opacity(0.3), style: StrokeStyle(lineWidth: 4, dash: [1, 11])).frame(width: 192, height: 192)
-            Circle().trim(from: 0.04, to: 0.44).stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round)).frame(width: 166, height: 166).rotationEffect(.degrees(-90))
-            Circle().trim(from: 0.54, to: 0.94).stroke(tint.opacity(0.5), style: StrokeStyle(lineWidth: 2, lineCap: .round)).frame(width: 166, height: 166).rotationEffect(.degrees(-90))
-            Circle().stroke(tint.opacity(0.12), lineWidth: 14).frame(width: 139, height: 139)
-            VStack(spacing: 8) {
-                Image(systemName: connected ? "waveform.path" : "bolt.slash").font(.system(size: 27, weight: .light))
-                Text(!connected ? "OFFLINE" : paused ? "PAUSED" : active > 0 ? "WORKING" : "READY")
-                    .font(.system(size: 18, weight: .medium, design: .monospaced)).tracking(3)
-                Text("EXECUTIVE CORE").font(.system(size: 8, design: .monospaced)).tracking(2)
-            }.foregroundStyle(tint)
-        }.frame(width: 220, height: 220)
+            Circle().fill(tint.opacity(0.035)).frame(width: 220, height: 220).blur(radius: 10)
+            Circle().stroke(tint.opacity(0.12), lineWidth: 1).frame(width: 224, height: 224)
+            Circle().stroke(tint.opacity(0.22), style: StrokeStyle(lineWidth: 1, dash: [2, 8])).frame(width: 206, height: 206)
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 102, weight: .ultraLight))
+                .foregroundStyle(tint.opacity(0.18)).accessibilityHidden(true)
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion)) { timeline in
+                let angle = reduceMotion ? 0.0 : timeline.date.timeIntervalSinceReferenceDate * 0.22
+                Canvas { context, size in
+                    let scale = min(size.width, size.height) * 0.39
+                    let points: [(CGPoint, Double)] = Self.nodes.map { x, y, z in
+                        let rotatedX = x * cos(angle) + z * sin(angle)
+                        let depth = -x * sin(angle) + z * cos(angle)
+                        let perspective = 1.0 + depth * 0.15
+                        return (CGPoint(x: size.width / 2 + CGFloat(rotatedX * perspective) * scale,
+                                        y: size.height / 2 + CGFloat(y * perspective) * scale), depth)
+                    }
+                    for (i, j) in Self.edges {
+                        var line = Path()
+                        line.move(to: points[i].0)
+                        line.addLine(to: points[j].0)
+                        context.stroke(line, with: .color(tint.opacity(0.10 + max(0, (points[i].1 + points[j].1) * 0.08))), lineWidth: 0.7)
+                    }
+                    for (point, depth) in points {
+                        let diameter: CGFloat = depth > 0 ? 3 : 1.8
+                        let dot = CGRect(x: point.x - diameter/2, y: point.y - diameter/2, width: diameter, height: diameter)
+                        context.fill(Path(ellipseIn: dot), with: .color(tint.opacity(depth > 0 ? 0.9 : 0.35)))
+                    }
+                }
+            }.frame(width: 220, height: 220).accessibilityHidden(true)
+            VStack {
+                Spacer()
+                Text(!connected ? "OFFLINE" : paused ? "PAUSED" : listening ? "LISTENING" : speaking ? "SPEAKING" : active > 0 ? "WORKING" : "READY")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced)).tracking(2)
+                    .foregroundStyle(tint).padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(HUD.ink.opacity(0.9)).clipShape(Capsule())
+            }.padding(.bottom, 2)
+        }.frame(width: 234, height: 234)
+        .scaleEffect(expanded ? 1.48 : 1)
+        .frame(width: expanded ? 350 : 234, height: expanded ? 350 : 234)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Executive core \(!connected ? "offline" : paused ? "paused" : active > 0 ? "working" : "ready")")
+        .accessibilityLabel("Executive core \(!connected ? "offline" : paused ? "paused" : listening ? "listening" : speaking ? "speaking" : active > 0 ? "working" : "ready")")
     }
 }
 struct CommandWindow: View {
     @ObservedObject var model: ExecutiveModel
+    @ObservedObject var voice: VoiceController
     var selectedTask: TaskRecord? { model.tasks.first { $0.id == model.selected } }
     var active: Int { model.tasks.filter(\.active).count }
-    var ready: Bool { model.connected && !model.paused && !model.submitting }
+    var ready: Bool { model.connected && !model.paused && !model.submitting && !voice.recording && !voice.preparing }
     var body: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(HUD.line).frame(height: 1)
             HStack(spacing: 0) {
-                sidebar.frame(width: 242)
-                Rectangle().fill(HUD.line).frame(width: 1)
+                if model.showingHistory {
+                    sidebar.frame(width: 242)
+                    Rectangle().fill(HUD.line).frame(width: 1)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         HStack {
                             VStack(alignment: .leading, spacing: 7) {
-                                eyebrow("OPERATIONS / LOCAL EXECUTIVE")
-                                Text(selectedTask == nil ? "Command center" : "Mission detail")
+                                eyebrow("JARVIS / LOCAL")
+                                Text(selectedTask == nil ? "Good to see you." : "Mission detail")
                                     .font(.system(size: 27, weight: .light))
                             }
                             Spacer()
-                            Button("Overview") { model.selected = nil }.buttonStyle(HUDButton())
+                            Button(model.showingHistory ? "Hide history" : "History \(model.tasks.count)") { model.showingHistory.toggle() }.buttonStyle(HUDButton())
+                            if selectedTask != nil { Button("Home") { model.selected = nil; model.showingHistory = false }.buttonStyle(HUDButton()) }
                         }
                         if let task = selectedTask { taskDetail(task) }
                         else { overview }
@@ -125,7 +177,7 @@ struct CommandWindow: View {
                             VStack(alignment: .leading, spacing: 9) {
                                 HStack {
                                     Circle().fill(stateColor(task.state)).frame(width: 5, height: 5)
-                                    Text(task.state.replacingOccurrences(of: "_", with: " ").uppercased()).font(.system(size: 9, weight: .medium, design: .monospaced)).tracking(1)
+                                    Text(stateLabel(task)).font(.system(size: 9, weight: .medium, design: .monospaced)).tracking(1)
                                     Spacer()
                                     Text(String(task.id.prefix(6))).font(.system(size: 9, design: .monospaced)).foregroundStyle(HUD.muted)
                                 }
@@ -147,18 +199,16 @@ struct CommandWindow: View {
     var overview: some View {
         VStack(spacing: 22) {
             HStack(spacing: 28) {
-                CoreDisplay(connected: model.connected, paused: model.paused, active: active)
+                CoreDisplay(connected: model.connected, paused: model.paused, active: active,
+                            listening: voice.recording || voice.preparing, speaking: voice.speaking, expanded: true)
                 VStack(alignment: .leading, spacing: 14) {
                     eyebrow("SYSTEM STATUS")
                     Text(model.connected ? "Standing by for your next move." : "Reconnect to your executive.")
                         .font(.system(size: 23, weight: .light)).fixedSize(horizontal: false, vertical: true)
-                    Text("Give a command. Track the execution. Inspect the proof.")
+                    Text("Ask anything, or tell me what to do.")
                         .font(.system(size: 12)).foregroundStyle(HUD.muted)
-                    HStack(spacing: 20) {
-                        metric("ACTIVE", active)
-                        metric("VERIFIED", model.tasks.filter { $0.state == "succeeded" }.count)
-                        metric("CAPABILITIES", model.capabilities.count)
-                    }.padding(.top, 4)
+                    Text(voice.recording ? "Listening to you…" : voice.speaking ? "Speaking…" : active > 0 ? "Working on it…" : "Ready when you are.")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(HUD.cyan)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(18)
                 .background(HUD.panel.opacity(0.65)).clipShape(RoundedRectangle(cornerRadius: 12))
@@ -173,31 +223,12 @@ struct CommandWindow: View {
                 Spacer()
                 Text("PROPOSE → CONFIRM → EXECUTE").font(.system(size: 9, design: .monospaced)).foregroundStyle(HUD.muted)
             }.padding(16).background(HUD.panel).clipShape(RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 12) {
-                eyebrow("QUICK OPERATIONS")
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                    ForEach(model.capabilities) { cap in
-                        Button { model.submit(cap.commands[0]) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: icon(cap.id)).font(.system(size: 19, weight: .light)).foregroundStyle(HUD.cyan).frame(width: 25)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(cap.title).font(.system(size: 13, weight: .medium))
-                                    Text(cap.id.hasPrefix("apps") ? "APP CONTROL" : "WORKSPACE").font(.system(size: 8, design: .monospaced)).tracking(1).foregroundStyle(HUD.muted)
-                                }
-                                Spacer()
-                                Image(systemName: "arrow.up.right").font(.system(size: 11)).foregroundStyle(HUD.cyan)
-                            }.padding(16).background(HUD.panel).clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(HUD.line))
-                        }.buttonStyle(.plain).disabled(!ready).opacity(ready ? 1 : 0.4)
-                    }
-                }
-            }
         }
     }
     func taskDetail(_ task: TaskRecord) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text(task.state.replacingOccurrences(of: "_", with: " ").uppercased()).font(.system(size: 11, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(stateColor(task.state))
+                Text(stateLabel(task)).font(.system(size: 11, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(stateColor(task.state))
                 if task.active { ProgressView().controlSize(.small) }
                 Spacer()
                 if task.active { Button("Cancel task") { model.action("tasks/\(task.id)/cancel") }.buttonStyle(HUDButton()).disabled(!model.connected) }
@@ -208,7 +239,8 @@ struct CommandWindow: View {
                     eyebrow("CONFIRM PROPOSED ACTION")
                     Text(model.capabilities.first { $0.id == task.capability }?.title ?? task.capability ?? "Unknown action")
                         .font(.system(size: 19, weight: .medium))
-                    Text("Review this interpretation. No action has been executed.").font(.system(size: 12)).foregroundStyle(HUD.muted)
+                    Text("Review the command and its permissions. No action has been executed.").font(.system(size: 12)).foregroundStyle(HUD.muted)
+                    Text(task.approval.text + "\n" + task.scope.text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                     if let proposal = task.proposal { Text(proposal.reason).font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
                     HStack {
                         Button("Confirm action") { model.action("tasks/\(task.id)/approve") }.buttonStyle(HUDButton(primary: true)).disabled(!model.connected || model.paused)
@@ -218,8 +250,18 @@ struct CommandWindow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8)).overlay(RoundedRectangle(cornerRadius: 8).stroke(HUD.cyan.opacity(0.4)))
             }
             if let error = task.error { section("ACTION REQUIRED", error, accent: .orange) }
-            if let result = task.result { section("OUTPUT", result.text) }
-            if !task.evidence.isEmpty { section("VERIFIED EVIDENCE", task.evidence.map(\.text).joined(separator: "\n\n")) }
+            if let result = task.result {
+                section("OUTPUT", result.text)
+                HStack {
+                    Button { voice.speak(result.spokenText) } label: { Label("Read result", systemImage: "speaker.wave.2") }
+                        .buttonStyle(HUDButton()).disabled(voice.recording || voice.preparing)
+                        .accessibilityLabel("Read selected task result aloud")
+                    if voice.speaking {
+                        Button("Stop speech") { voice.stopSpeaking() }.buttonStyle(HUDButton())
+                    }
+                }
+            }
+            if !task.evidence.isEmpty { section("EVIDENCE & LIMITATIONS", task.evidence.map(\.text).joined(separator: "\n\n")) }
             DisclosureGroup("Authorization & scope") { section("SCOPED GRANT", task.approval.text + "\n" + task.scope.text) }
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(HUD.muted)
             VStack(alignment: .leading, spacing: 12) {
@@ -240,23 +282,46 @@ struct CommandWindow: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Text(">_").font(.system(size: 19, weight: .medium, design: .monospaced)).foregroundStyle(HUD.cyan)
-                TextField("Enter a command…", text: $model.command).textFieldStyle(.plain)
+                TextField("Ask a question or enter a command…", text: $model.command).textFieldStyle(.plain)
                     .font(.system(size: 14, design: .monospaced))
                     .onSubmit { if ready { model.submit() } }
                     .accessibilityLabel("Command input")
+                Button {
+                    voice.toggleCapture { text in
+                        model.command += (model.command.isEmpty ? "" : " ") + text
+                    }
+                } label: {
+                    Label(voice.recording || voice.preparing ? "Stop mic" : "Mic", systemImage: voice.recording ? "stop.circle" : "mic")
+                }.buttonStyle(HUDButton()).disabled(voice.handsFreeEnabled)
+                    .accessibilityLabel(voice.recording || voice.preparing ? "Stop microphone and review transcript" : "Start on-device voice input")
+                    .help("Press to start, press again to stop. Text is reviewed before execution.")
                 Button { model.submit() } label: { Label("Execute", systemImage: "arrow.up.right") }
                     .buttonStyle(HUDButton(primary: true)).keyboardShortcut(.return, modifiers: .command)
                     .disabled(!ready || model.command.isEmpty).opacity(ready ? 1 : 0.4)
             }.padding(12).background(HUD.panel).clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(HUD.cyan.opacity(0.35)))
+            Text(voice.status).font(.system(size: 11, design: .monospaced)).foregroundStyle(HUD.cyan)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            if voice.recording && !voice.transcript.isEmpty {
+                Text(voice.transcript).font(.caption).foregroundStyle(HUD.muted).lineLimit(2)
+            }
             if let error = model.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
             HStack(spacing: 15) {
-                Button("Stop All") { model.action("stop-all") }.foregroundStyle(.orange).disabled(!model.connected)
+                Button(voice.handsFreeEnabled ? "Hands-free on" : "Hands-free off") { model.toggleHandsFree() }
+                    .foregroundStyle(voice.handsFreeEnabled ? HUD.cyan : HUD.muted)
+                Button("Stop All") { model.action("stop-all") }.foregroundStyle(.orange)
                 if model.paused { Button("Resume") { model.action("resume") }.disabled(!model.connected) }
                 if !model.connected { Button("Restart Executive") { model.start() } }
                 Spacer()
-                Text("LOCAL EXECUTION  /  VERIFIED OUTCOMES").font(.system(size: 9, design: .monospaced)).tracking(1).foregroundStyle(HUD.muted)
-                Button("Quit") { NSApplication.shared.terminate(nil) }
+                Menu("More") {
+                    Button("Choose notes folder") { model.chooseMemoryFolder() }.disabled(!model.connected || model.paused)
+                    if model.memoryFolder?.kind == "selected" {
+                        Button("Use demo notes") { model.setMemoryFolder("") }.disabled(!model.connected || model.paused)
+                    }
+                    if let folder = model.memoryFolder { Text("Notes: \(folder.path)") }
+                    Divider()
+                    Button("Quit JARVIS") { NSApplication.shared.terminate(nil) }
+                }
             }.buttonStyle(.plain).font(.system(size: 11, weight: .medium, design: .monospaced))
         }.padding(.horizontal, 24).padding(.vertical, 16).background(HUD.ink)
     }
@@ -276,10 +341,56 @@ struct CommandWindow: View {
         }.frame(maxWidth: .infinity, alignment: .leading).padding(18).background(HUD.panel)
             .clipShape(RoundedRectangle(cornerRadius: 8)).overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.18)))
     }
+    func stateLabel(_ task: TaskRecord) -> String {
+        if task.state == "succeeded", task.capability == "chat.local" { return "ANSWERED" }
+        return task.state.replacingOccurrences(of: "_", with: " ").uppercased()
+    }
+
     func stateColor(_ state: String) -> Color {
         switch state { case "succeeded": return HUD.cyan; case "failed", "interrupted": return .orange; case "running", "queued", "awaiting_approval": return .yellow; default: return HUD.muted }
     }
     func icon(_ id: String) -> String {
         switch id { case "apps.calculator": return "calculator"; case "apps.finder": return "macwindow"; case "files.list": return "folder"; default: return "doc.badge.plus" }
+    }
+}
+
+private final class FloatingCompanionHost: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        window.level = .floating
+        window.collectionBehavior.insert(.canJoinAllSpaces)
+        window.isMovableByWindowBackground = true
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+    }
+}
+
+private struct FloatingCompanionWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { FloatingCompanionHost() }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
+struct CompanionWindow: View {
+    @ObservedObject var model: ExecutiveModel
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        VStack(spacing: 8) {
+            CoreDisplay(connected: model.connected, paused: model.paused,
+                        active: model.tasks.filter(\.active).count,
+                        listening: model.voice.recording || model.voice.preparing,
+                        speaking: model.voice.speaking)
+            HStack {
+                Button("Open JARVIS") { openWindow(id: "command"); NSApp.activate(ignoringOtherApps: true) }
+                Spacer()
+                Button(model.voice.handsFreeEnabled ? "Listening" : "Hands-free") { model.toggleHandsFree() }
+            }.font(.system(size: 11, design: .monospaced))
+        }
+        .padding(14)
+        .frame(width: 280, height: 285)
+        .background(HUD.ink)
+        .foregroundStyle(HUD.cyan)
+        .background(FloatingCompanionWindow())
+        .preferredColorScheme(.dark)
     }
 }

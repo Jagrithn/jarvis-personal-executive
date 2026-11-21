@@ -4,18 +4,22 @@ import hmac
 import json
 import os
 import queue
+import re
 import signal
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 from adapters import execute, Cancelled
-from policy import CAPABILITIES, route, authorize
+from policy import CAPABILITIES, APPROVALS, route, authorize
 from store import Store
+from scheduler import Scheduler
 from verification import verify
 from reasoning import LocalReasoner
+from knowledge import execute_knowledge, verify_knowledge
 
 TERMINAL = {'succeeded', 'failed', 'cancelled', 'interrupted'}
 def now():
@@ -28,6 +32,7 @@ class Executive:
         self.root.mkdir(exist_ok=True)
         self.helper, self.executor, self.checker = helper, executor, checker
         self.reasoner = reasoner or LocalReasoner(data)
+        self.native_agent = reasoner is None
         self.store = Store(data / 'tasks.sqlite3')
         self.tasks = {t['id']: t for t in self.store.all()}
         self.lock = threading.RLock()
@@ -38,6 +43,8 @@ class Executive:
         for task in self.tasks.values():
             if task['state'] not in TERMINAL:
                 self.transition(task, 'interrupted', 'Service restarted; task was not replayed')
+        self.scheduler = Scheduler(data)
+        self.scheduler_error = None
         self.worker = threading.Thread(target=self.work, daemon=True)
         self.worker.start()
 
@@ -64,7 +71,7 @@ class Executive:
             self.tasks[task['id']] = task
             try:
                 try:
-                    task['capability'] = route(body['command'])
+                    task['capability'] = route(body['command'], general_conversation=self.native_agent)
                 except ValueError:
                     if not self.reasoner.enabled:
                         raise
@@ -76,18 +83,35 @@ class Executive:
                     return self.snapshot(task)
                 grant = authorize(self.root, task['capability'], body.get('path'))
                 task['approval'] = grant
-                task['scope'] = {'paths': grant['paths'], 'network': False}
+                task['scope'] = {'paths': grant['paths'], 'network': grant['network']}
+                if task['capability'].startswith('memory.'):
+                    from knowledge import memory_folder
+                    task['scope']['paths'] = [memory_folder(self.root) or str(self.root)]
+                    task['approval']['paths'] = task['scope']['paths']
             except ValueError as error:
                 task['error'] = str(error)
                 self.transition(task, 'failed', str(error))
                 return self.snapshot(task)
             self.cancels[task['id']] = threading.Event()
+            if task['capability'] in APPROVALS:
+                task['approval'] = {'kind': 'pending', 'source': APPROVALS[task['capability']]}
+                self.transition(task, 'awaiting_approval', APPROVALS[task['capability']])
+                return self.snapshot(task)
             self.transition(task, 'queued', 'Scope approved; awaiting execution')
             self.queue.put(task['id'])
             return self.snapshot(task)
 
     def snapshot(self, value):
         return json.loads(json.dumps(value))
+
+    def change_memory_folder(self, body):
+        from knowledge import set_memory_folder
+        if not isinstance(body, dict) or set(body) != {'path'} or not isinstance(body['path'], str):
+            raise ValueError('Expected a folder path.')
+        with self.lock:
+            if any(task['state'] not in TERMINAL for task in self.tasks.values()):
+                raise ValueError('Finish or cancel active tasks before changing the memory folder.')
+            return set_memory_folder(self.root, body['path'])
 
     def cancel(self, task_id):
         with self.lock:
@@ -109,9 +133,12 @@ class Executive:
             if task['state'] != 'awaiting_approval':
                 raise ValueError('Task is not awaiting approval')
             grant = authorize(self.root, task['capability'], task.get('requested_path'))
-            grant['source'] = 'owner confirmed local model proposal'
+            if task['capability'].startswith('memory.'):
+                from knowledge import memory_folder
+                grant['paths'] = [memory_folder(self.root) or str(self.root)]
+            grant['source'] = 'owner confirmed: ' + APPROVALS.get(task['capability'], 'local model proposal')
             task['approval'] = grant
-            self.transition(task, 'queued', 'Owner confirmed proposed action')
+            self.transition(task, 'queued', 'Owner confirmed scoped action')
             self.queue.put(task_id)
             return self.snapshot(task)
 
@@ -120,11 +147,25 @@ class Executive:
             self.paused = True
             for key in self.tasks:
                 self.cancel(key)
+            try:
+                self.scheduler.pause_all()
+            except Exception as error:
+                self.scheduler_error = 'Could not persist schedule pause: ' + str(error)
         return {'paused': True}
 
     def work(self):
         while True:
-            key = self.queue.get()
+            try:
+                key = self.queue.get(timeout=.5)
+            except queue.Empty:
+                with self.lock:
+                    if not self.paused and not self.closing:
+                        try:
+                            self.scheduler.tick(self.submit, self.tasks.get)
+                            self.scheduler_error = None
+                        except Exception as error:
+                            self.scheduler_error = str(error)
+                continue
             if key is None:
                 return
             with self.lock:
@@ -144,24 +185,181 @@ class Executive:
                             raise ValueError('Cannot safely determine a supported action: ' + proposal['reason'])
                         grant = authorize(self.root, proposal['capability'], task.get('requested_path'))
                         task['capability'] = proposal['capability']
-                        task['scope'] = {'paths': grant['paths'], 'network': False}
+                        task['scope'] = {'paths': grant['paths'], 'network': grant['network']}
                         task['approval'] = {'kind': 'pending', 'source': 'model proposal requires owner confirmation'}
                         self.transition(task, 'awaiting_approval', 'Proposed ' + CAPABILITIES[task['capability']][0] + '; confirm before execution')
                     continue
                 authorize(self.root, task['capability'], task.get('requested_path'))
-                result = self.executor(task['capability'], self.root, event, self.helper)
+                knowledge = task['capability'].startswith(('chat.', 'memory.'))
+                if task['capability'] == 'mac.items':
+                    from mac_items import perform
+                    with self.lock:
+                        previous = sorted((old for old in self.tasks.values()
+                                           if old['id'] != task['id'] and old['command'] == task['command']
+                                           and old['capability'] == 'mac.items' and old['state'] == 'succeeded'
+                                           and isinstance(old.get('result'), dict)
+                                           and old['result'].get('outcome') == 'opened'
+                                           and old.get('evidence')), key=lambda old: old['created_at'])
+                        remembered = previous[-1]['result'].get('opened') if previous else None
+                    result = perform(task['command'], event, self.helper, remembered=remembered)
+                    checker = lambda: [{'check':'macOS open callback', **item} for item in result['opened']] or [{'check':'search results', 'count':len(result['matches'])}]
+                elif task['capability'] == 'agent.plan':
+                    from agent import ALLOWED
+                    actions = task['proposal']['actions']
+                    if not isinstance(actions, list) or not 1 <= len(actions) <= 4 or any(a not in ALLOWED for a in actions):
+                        raise ValueError('Invalid action plan')
+                    result = {'steps': []}
+                    evidence = []
+                    for action in actions:
+                        if event.is_set():
+                            raise Cancelled('Plan cancelled; completed effects remain in task history')
+                        authorize(self.root, action, task.get('requested_path'))
+                        outcome = self.executor(action, self.root, event, self.helper)
+                        with self.lock:
+                            result['steps'].append({'capability':action, 'result':outcome})
+                            task['result'] = result
+                            self.store.save(task)
+                        evidence.extend(self.checker(action, outcome, self.root, event, self.helper))
+                        with self.lock:
+                            task['evidence'] = list(evidence)
+                            self.transition(task, 'running', 'Verified ' + action)
+                    checker = lambda: evidence
+                elif task['capability'].startswith('schedules.'):
+                    with self.lock:
+                        if event.is_set():
+                            raise Cancelled('Schedule action cancelled')
+                        result = self.schedule_action(task['capability'], task['command'])
+                    checker = lambda: [{'check': 'scheduler persisted state read-back', 'records': self.scheduler.verify_persisted()}]
+                elif task['capability'] == 'coding.build':
+                    from coding import execute_coding, verify_coding
+                    result = execute_coding(task['capability'], task['command'], self.root, event)
+                    checker = lambda: verify_coding(task['capability'], result, self.root)
+                elif task['capability'] == 'workflows.research':
+                    from browser import research_chrome, research_articles, verify_browser
+                    from workflows import research_report_topic, save_research_report, verify_research_report
+                    topic = research_report_topic(task['command'])
+                    if not topic:
+                        raise ValueError('Expected: research TOPIC and save a report')
+                    page, search_receipts = research_chrome('research ' + topic, event, self.helper)
+                    articles = research_articles(page, self.root, event)
+                    excerpts = '\n\n'.join('Source: ' + a['source_url'] + '\n' + a['text'][:3500] for a in articles)
+                    summary = execute_knowledge('browser.article_summary', excerpts, self.root, event)['answer']
+                    result = save_research_report(topic, summary, articles, self.root, event)
+                    checker = lambda: (search_receipts +
+                                       [receipt for article in articles for receipt in verify_browser('browser.read', article, self.root)] +
+                                       verify_research_report(result, self.root))
+                elif task['capability'] in {'browser.results', 'browser.research'}:
+                    from browser import read_chrome_results, research_chrome, research_articles, verify_browser
+                    import hashlib
+                    if task['capability'] == 'browser.research':
+                        page, search_receipts = research_chrome(task['command'], event, self.helper)
+                    else:
+                        page, search_receipts = read_chrome_results(event), []
+                    if task['capability'] == 'browser.research':
+                        articles = research_articles(page, self.root, event)
+                        excerpts = '\n\n'.join('Source: ' + a['source_url'] + '\n' + a['text'][:3500] for a in articles)
+                        result = execute_knowledge('browser.article_summary', excerpts, self.root, event)
+                        result['sources'] = [a['source_url'] for a in articles]
+                        result['notice'] = 'Summary of retrieved article text; facts are not independently verified.'
+                        checker = lambda: search_receipts + [item for article in articles for item in verify_browser('browser.read', article, self.root)]
+                    else:
+                        result = execute_knowledge('browser.summary', page['text'], self.root, event)
+                        result['sources'] = [page['url']]
+                        result['notice'] = 'Summary of Google search snippets. Linked articles were not read; facts are not independently verified.'
+                        checker = lambda: search_receipts + [{'check': 'Chrome visible search text captured', 'source_url': page['url'], 'sha256': hashlib.sha256(page['text'].encode()).hexdigest(), 'factual_accuracy_verified': False}]
+                elif task['capability'] == 'browser.search':
+                    from browser import search_chrome
+                    result, receipts = search_chrome(task['command'], event, self.helper)
+                    checker = lambda: receipts
+                elif task['capability'] == 'browser.read':
+                    from browser import execute_browser, verify_browser
+                    result = execute_browser(task['capability'], task['command'], self.root, event)
+                    checker = lambda: verify_browser(task['capability'], result, self.root)
+                elif task['capability'].startswith(('workflows.', 'workers.')):
+                    from workflows import execute_workflow, verify_workflow
+                    result = execute_workflow(task['capability'], task['command'], self.root, event)
+                    checker = lambda: verify_workflow(task['capability'], result, self.root)
+                else:
+                    execution_started = time.monotonic()
+                    result = (execute_knowledge(task['capability'], task['command'], self.root, event,
+                                                history=self.chat_history(task['id']) if task['capability'] == 'chat.local' else None)
+                              if knowledge else self.executor(task['capability'], self.root, event, self.helper))
+                    if knowledge:
+                        with self.lock:
+                            self.transition(task, 'running', f'Local execution finished in {time.monotonic() - execution_started:.2f}s; verifying result')
+                    checker = lambda: (verify_knowledge(task['capability'], result, self.root) if knowledge
+                                       else self.checker(task['capability'], result, self.root, event, self.helper))
+                if task['capability'] == 'chat.local' and result.get('actions'):
+                    from agent import ALLOWED
+                    actions = result['actions']
+                    if not isinstance(actions, list) or not 1 <= len(actions) <= 4 or any(a not in ALLOWED for a in actions):
+                        raise ValueError('Invalid proposed actions')
+                    with self.lock:
+                        if event.is_set():
+                            raise Cancelled('Cancelled before plan approval')
+                        task['proposal'] = {'capability':'agent.plan', 'actions': actions, 'reason':'Approve in order: ' + ', '.join(actions)}
+                        task['capability'] = 'agent.plan'
+                        task['approval'] = {'kind':'pending', 'source':'Approve in order: ' + ', '.join(actions)}
+                        self.transition(task, 'awaiting_approval', task['approval']['source'])
+                    continue
+                with self.lock:
+                    if task['capability'] not in {'memory.answer', 'memory.search'}:
+                        task['result'] = result
+                        self.store.save(task)
+                verification_started = time.monotonic()
+                evidence = checker()
+                if knowledge:
+                    with self.lock:
+                        self.transition(task, 'running', f'Result verified in {time.monotonic() - verification_started:.2f}s')
                 with self.lock:
                     task['result'] = result
-                    self.store.save(task)
-                evidence = self.checker(task['capability'], result, self.root, event, self.helper)
-                with self.lock:
                     task['evidence'] = evidence
-                    self.transition(task, 'succeeded', 'Outcome independently verified; any late cancellation cannot undo it')
+                    if task['capability'] == 'mac.items' and result.get('outcome') in {'needs_clarification', 'not_found'}:
+                        task['error'] = result['message'] + ' Nothing was opened.'
+                        self.transition(task, 'failed', task['error'])
+                    else:
+                        message = ('macOS accepted the open request; opened items may remain open.' if task['capability'] == 'mac.items' and result.get('opened')
+                                   else 'Search completed; nothing opened.' if task['capability'] == 'mac.items'
+                                   else 'Response received; AI factual accuracy is not verified' if 'answer' in result
+                                   else 'Outcome independently verified; any late cancellation cannot undo it')
+                        self.transition(task, 'succeeded', message)
             except Exception as error:
                 with self.lock:
                     task['error'] = str(error)
+                    if task['capability'] in {'memory.answer', 'memory.search'} and task['result'] is not None:
+                        task['result'] = None
+                        task['events'].append({'time': now(), 'state': 'failed', 'message': 'Rejected retrieval content withheld from output'})
                     state = 'cancelled' if isinstance(error, Cancelled) else 'failed'
                     self.transition(task, state, str(error))
+
+    def chat_history(self, current_id):
+        with self.lock:
+            current = self.tasks[current_id]
+            prior = sorted((t for t in self.tasks.values() if t['id'] != current_id
+                            and t['created_at'] < current['created_at'] and t['state'] == 'succeeded'
+                            and t['capability'] == 'chat.local' and isinstance(t.get('result'), dict)
+                            and t['result'].get('conversation_version') == (2 if self.native_agent else 1)
+                            and isinstance(t['result'].get('answer'), str)), key=lambda t: t['created_at'])[-3:]
+            messages = []
+            for task in prior:
+                messages.extend([{'role': 'user', 'content': task['command'][:2000]},
+                                 {'role': 'assistant', 'content': task['result']['answer'][:2000]}])
+            return messages
+
+    def schedule_action(self, capability, command):
+        if capability == 'schedules.create':
+            match = re.fullmatch(r'schedule worker:\s*([a-z-]+) every ([0-9]+)', command.strip(), re.IGNORECASE)
+            if not match:
+                raise ValueError('Use schedule worker: research-reporter every 3600 (seconds)')
+            return {'schedule': self.scheduler.create(match[1].lower(), int(match[2]))}
+        if capability == 'schedules.cancel':
+            record = self.scheduler.cancel(command.split(':', 1)[1].strip())
+            if record['task_id'] in self.tasks:
+                self.cancel(record['task_id'])
+            return {'schedule': record}
+        if capability == 'schedules.resume':
+            return {'schedules': self.scheduler.resume_all()}
+        return {'schedules': self.scheduler.list(), 'error': self.scheduler_error}
 
     def close(self):
         self.closing = True
@@ -170,6 +368,7 @@ class Executive:
         self.worker.join(timeout=15)
         if self.worker.is_alive():
             raise RuntimeError('Worker failed to stop')
+        self.scheduler.close()
         self.reasoner.close()
         self.store.close()
 
@@ -218,9 +417,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(size) or b'{}')
             with engine.lock:
                 if not post and path == '/v1/health':
-                    result = {'status': 'ok', 'api_version': 1, 'paused': engine.paused}
+                    result = {'status': 'ok', 'api_version': 1, 'paused': engine.paused, 'scheduler_error': engine.scheduler_error}
                 elif not post and path == '/v1/model':
                     result = engine.reasoner.describe()
+                elif not post and path == '/v1/memory/folder':
+                    from knowledge import memory_folder
+                    folder = memory_folder(engine.root)
+                    result = {'path': folder or str(engine.root), 'kind': 'selected' if folder else 'workspace'}
+                elif post and path == '/v1/memory/folder':
+                    result = engine.change_memory_folder(body)
                 elif not post and path == '/v1/capabilities':
                     result = [{'id': k, 'title': v[0], 'commands': v[1]} for k, v in CAPABILITIES.items()]
                 elif not post and path == '/v1/tasks':

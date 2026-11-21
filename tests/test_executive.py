@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'services/executive'))
 from server import Executive, Server
-from policy import route, authorize
+from policy import route, authorize, CAPABILITIES
 from adapters import execute, Cancelled
 from verification import verify
 
@@ -33,7 +33,7 @@ class ExecutiveTests(unittest.TestCase):
     def test_routing_and_unsupported_commands(self):
         self.assertEqual(route('  OPEN Calculator. '), 'apps.calculator')
         result = self.engine.submit({'command': 'delete everything'})
-        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['capability'], 'chat.local')
         self.assertIsNone(result['result'])
     def test_request_validation(self):
         for body in ([], {}, {'command': 2}, {'command': ''}, {'command': 'x' * 501}, {'command': 'list files', 'shell': 'ls'}, {'command': 'list files', 'path': 3}):
@@ -140,12 +140,13 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.call('/v1/health', extra={'Origin': 'https://evil.example'})[0], 403)
         self.assertEqual(self.call('/v1/health', extra={'Host': 'evil.example'})[0], 403)
         self.assertEqual(self.call('/v1/health')[1]['status'], 'ok')
-        self.assertEqual(len(self.call('/v1/capabilities')[1]), 4)
+        self.assertEqual({c['id'] for c in self.call('/v1/capabilities')[1]}, set(CAPABILITIES))
         self.assertFalse(self.call('/v1/model')[1]['enabled'])
         self.assertEqual(self.call('/v1/nope')[0], 404)
     def test_proposal_approval_endpoints(self):
         from test_reasoning import FakeReasoner
         self.engine.reasoner = FakeReasoner()
+        self.engine.native_agent = False  # Exercise the retained legacy proposal API.
         _, task = self.call('/v1/tasks', {'command': 'Make a demo document please'})
         for _ in range(100):
             record = self.call('/v1/tasks/' + task['id'])[1]
@@ -157,6 +158,19 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {}, token='bad')[0], 401)
         self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {})[0], 200)
         self.assertEqual(self.call('/v1/tasks/' + task['id'] + '/approve', {})[0], 400)
+
+    def test_memory_folder_api_auth_scope_and_reset(self):
+        folder = pathlib.Path(self.temp.name).resolve() / 'selected'
+        folder.mkdir()
+        self.assertEqual(self.call('/v1/memory/folder', token='bad')[0], 401)
+        self.assertEqual(self.call('/v1/memory/folder', {'path': str(folder)}, token='bad')[0], 401)
+        self.assertEqual(self.call('/v1/memory/folder', {'path': str(folder)})[1]['path'], str(folder))
+        self.assertEqual(self.call('/v1/memory/folder')[1]['kind'], 'selected')
+        _, task = self.call('/v1/tasks', {'command': 'index workspace'})
+        self.assertEqual(task['scope']['paths'], [str(folder)])
+        self.assertEqual(self.call('/v1/memory/folder', {'path': ''})[0], 400)
+        self.call('/v1/tasks/' + task['id'] + '/cancel', {})
+        self.assertEqual(self.call('/v1/memory/folder', {'path': ''})[1]['kind'], 'workspace')
 
     def test_task_and_control_endpoints(self):
         code, task = self.call('/v1/tasks', {'command': 'list files'})

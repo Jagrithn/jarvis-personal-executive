@@ -1,0 +1,16 @@
+FROM qwen3:4b
+# Dedicated text-only Qwen3 template: prefill an empty thinking block.
+# Tools are provided only by JARVIS adapters, never through this chat model.
+TEMPLATE """{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+PARAMETER temperature 0.2
+PARAMETER num_ctx 4096
+PARAMETER num_predict 600
+PARAMETER stop <|im_start|>
+PARAMETER stop <|im_end|>

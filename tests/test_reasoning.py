@@ -119,3 +119,35 @@ class InferenceProcessTests(unittest.TestCase):
     def test_private_input_survives_polling(self):
         result = run_process([sys.executable, '-c', 'import sys,time; data=sys.stdin.read(); time.sleep(.15); print(data)'], threading.Event(), timeout=2, input_text='one request')
         self.assertEqual(result, 'one request')
+
+class ConversationRoutingTests(unittest.TestCase):
+    def test_plain_questions_and_followups_route_without_action_classifier(self):
+        from policy import route
+        for command in ['Hi', 'What can you do?', 'Explain gravity and give an example', 'How does a computer work?', 'Tell me a joke', 'Make it shorter', 'What did I just ask?', 'Can you explain photosynthesis?']:
+            with self.subTest(command=command):
+                self.assertEqual(route(command), 'chat.local')
+        for command in ['Can you open calculator?', 'Please delete my files', 'Send email']:
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                route(command)
+
+    def test_conversation_keeps_original_text_and_recent_successful_context(self):
+        from unittest.mock import patch
+        captured = []
+        def respond(capability, command, root, cancel, history=None):
+            captured.append((command, history))
+            return {'answer': 'Hello there.', 'conversation_version': 1}
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Executive(pathlib.Path(directory).resolve(), pathlib.Path('/missing'), reasoner=FakeReasoner())
+            try:
+                with patch('server.execute_knowledge', side_effect=respond):
+                    for command in ['Hi', 'What did I just ask?']:
+                        task = engine.submit({'command': command})
+                        for _ in range(200):
+                            current = engine.tasks[task['id']]
+                            if current['state'] not in {'queued', 'running'}: break
+                            time.sleep(.01)
+                        self.assertEqual(current['state'], 'succeeded', current)
+                self.assertEqual(captured[0], ('Hi', []))
+                self.assertEqual(captured[1][1], [{'role': 'user', 'content': 'Hi'}, {'role': 'assistant', 'content': 'Hello there.'}])
+            finally:
+                engine.close()

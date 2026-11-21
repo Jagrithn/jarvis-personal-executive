@@ -56,3 +56,9 @@ python3 scripts/smoke_reasoning.py
 The pull downloads approximately 2.5 GB. Keep the JARVIS app running during the benchmark; it owns the local runtime. Quit stops a runtime it started. To disable local reasoning, remove only the empty `data/enable-local-model` marker and restart JARVIS; exact commands remain functional.
 
 The final measured candidate passes 20/20 guarded routing checks. This establishes suitability for the current four-capability prototype; it does not establish that 4B is the smallest possible viable model or that it can perform general autonomous work.
+
+## Conversation correction — 1 November 2026
+
+Plain questions and greetings now route directly to text conversation. The original action classifier still proposes only the four initial capabilities. `chat:` remains an explicit fallback for other wording. Conversation includes up to three prior successful corrected chat exchanges; old drafting-text outputs are excluded.
+
+The local qwen3:4b template inspected on this machine always opened `<think>`. The chat-specific `jarvis-chat:4b` template prefills an empty thinking block using the same weights. Recreate with `scripts/setup-chat-model.sh` after opening JARVIS. Qwen documents the distinction between hard template control and the soft `/no_think` instruction: https://qwen.readthedocs.io/en/stable/getting_started/quickstart.html . The real-model smoke suite tests concise final answers, not merely successful HTTP responses.
